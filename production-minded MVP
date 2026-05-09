@@ -1,0 +1,247 @@
+Отлично. Давайте сразу как **production-minded MVP**, чтобы можно было поднять на VPS/домашнем сервере и потом расширять.
+
+Архитектура:
+
+```text
+Internet
+   │
+   ▼
+Caddy (TLS reverse proxy)
+   │
+   ├── /        → Directus (admin + public API)
+   ├── /flow    → n8n
+   └── /minio   → MinIO console
+                │
+                ▼
+          PostgreSQL
+                │
+                ├── metadata
+                └── OCR results
+
+upload scan
+   ↓
+MinIO bucket (raw-scans)
+   ↓
+n8n trigger
+   ↓
+PaddleOCR worker
+   ↓
+parsed JSON
+   ↓
+Directus collections
+   ↓
+Volunteer validation
+   ↓
+Published memorial page
+```
+
+---
+
+# структура проекта
+
+```text
+memorial-platform/
+├── docker-compose.yml
+├── .env
+├── Caddyfile
+├── .devcontainer/
+│   └── devcontainer.json
+└── storage/
+    ├── postgres/
+    ├── minio/
+    └── directus/
+```
+
+---
+
+# docker-compose.yml
+
+```yaml
+version: "3.9"
+
+services:
+
+  postgres:
+    image: postgres:17
+    container_name: memorial-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: memorial
+      POSTGRES_USER: memorial
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./storage/postgres:/var/lib/postgresql/data
+    networks:
+      - memorial
+
+  directus:
+    image: directus/directus:latest
+    container_name: memorial-directus
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      SECRET: ${DIRECTUS_SECRET}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      DB_CLIENT: pg
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_DATABASE: memorial
+      DB_USER: memorial
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./storage/directus:/directus/uploads
+    networks:
+      - memorial
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: memorial-n8n
+    restart: unless-stopped
+    environment:
+      N8N_HOST: n8n.local
+      WEBHOOK_URL: https://yourdomain/flow/
+      GENERIC_TIMEZONE: Europe/Amsterdam
+    volumes:
+      - ./storage/n8n:/home/node/.n8n
+    networks:
+      - memorial
+
+  minio:
+    image: minio/minio:latest
+    container_name: memorial-minio
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD}
+    volumes:
+      - ./storage/minio:/data
+    networks:
+      - memorial
+
+  paddleocr:
+    image: paddlex/paddlex:latest
+    container_name: memorial-paddleocr
+    restart: unless-stopped
+    command: sleep infinity
+    networks:
+      - memorial
+
+  caddy:
+    image: caddy:latest
+    container_name: memorial-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+    networks:
+      - memorial
+
+volumes:
+  caddy_data:
+
+networks:
+  memorial:
+```
+
+---
+
+# .env
+
+```env
+POSTGRES_PASSWORD=change_me
+
+DIRECTUS_SECRET=super_secret
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=change_me
+
+MINIO_USER=minio
+MINIO_PASSWORD=change_me
+```
+
+---
+
+# Caddyfile
+
+```caddy
+yourdomain.com {
+
+ reverse_proxy / directus:8055
+
+ handle_path /flow/* {
+   reverse_proxy n8n:5678
+ }
+
+ handle_path /minio/* {
+   reverse_proxy minio:9001
+ }
+}
+```
+
+---
+
+# .devcontainer/devcontainer.json
+
+(все образы — из Docker Hub)
+
+```json
+{
+  "name": "memorial-platform",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:24",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "postCreateCommand": "npm install -g npm@latest",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-azuretools.vscode-docker",
+        "esbenp.prettier-vscode",
+        "ms-vscode.vscode-json",
+        "redhat.vscode-yaml"
+      ]
+    }
+  },
+  "remoteUser": "node"
+}
+```
+
+---
+
+# первый запуск
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+открыть:
+
+* `https://yourdomain.com` → [Directus](https://directus.io/?utm_source=chatgpt.com)
+* `https://yourdomain.com/flow` → [n8n](https://n8n.io/?utm_source=chatgpt.com)
+* `https://yourdomain.com/minio` → [MinIO](https://min.io/?utm_source=chatgpt.com)
+
+---
+
+# первое n8n workflow
+
+```text
+MinIO new file
+   ↓
+download image
+   ↓
+send to PaddleOCR
+   ↓
+JSON parse
+   ↓
+create draft in Directus
+```
+
+Это даст ваш желаемый сценарий:
+
+**зашла → загрузила скан → OCR сам заполнил → запись появилась в БД → волонтер проверил → публикация.**
